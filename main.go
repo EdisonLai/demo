@@ -4,13 +4,16 @@ import (
 	"context"
 	"cri-demo/global"
 	"fmt"
+	"os"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
 )
 
 func main() {
-	sandboxFind("test")
+	args := os.Args
+	_, err := sandboxFind(args[1])
+	fmt.Println(err)
 }
 
 func containerdFind() (int, error) {
@@ -44,13 +47,11 @@ func sandboxFind(podName string) (int, error) {
 	defer client.Close()
 
 	ctx := namespaces.WithNamespace(context.Background(), global.K8sNamespace)
-	sandboxs, err := client.SandboxStore().List(ctx)
+	sandbox, err := client.LoadSandbox(ctx, podName)
 	if err != nil {
 		return 0, fmt.Errorf("error listing containers in containerd: %v", err)
 	}
 
-	for _, sandbox := range sandboxs {
-		fmt.Printf("sandbox %+v\n", sandbox)
-	}
+	fmt.Printf("sandbox %+v\n", sandbox)
 	return 0, nil
 }
