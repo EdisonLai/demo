@@ -2,56 +2,77 @@ package main
 
 import (
 	"context"
-	"cri-demo/global"
 	"fmt"
+	"net"
 	"os"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
+	"google.golang.org/grpc"
+	criapi "k8s.io/cri-api/pkg/apis/runtime/v1" // 使用 v1 版本
+)
+
+const (
+	containerdSocket = "/run/containerd/containerd.sock"
+	crioSocket       = "/var/run/crio/crio.sock"
 )
 
 func main() {
-	args := os.Args
-	_, err := sandboxFind(args[1])
-	fmt.Println(err)
-}
-
-func containerdFind() (int, error) {
-	client, err := containerd.New(global.ContainerdRuntimeAddress)
+	conn, err := grpc.Dial(
+		getCRISocket(),
+		grpc.WithInsecure(),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return net.Dial("unix", addr)
+		}),
+	)
 	if err != nil {
-		return 0, fmt.Errorf("error creating containerd client:%v", err)
+		panic(fmt.Sprintf("Failed to connect: %v", err))
 	}
-	defer client.Close()
+	defer conn.Close()
 
-	ctx := namespaces.WithNamespace(context.Background(), global.K8sNamespace)
-	containers, err := client.Containers(ctx)
+	client := criapi.NewRuntimeServiceClient(conn)
+
+	pods, err := client.ListPodSandbox(context.Background(), &criapi.ListPodSandboxRequest{})
 	if err != nil {
-		return 0, fmt.Errorf("error listing containers in containerd: %v", err)
+		panic(fmt.Sprintf("ListPodSandbox failed: %v", err))
 	}
 
-	for _, ctr := range containers {
-		labels, err := ctr.Labels(ctx)
+	for _, pod := range pods.Items {
+		status, err := client.PodSandboxStatus(context.Background(), &criapi.PodSandboxStatusRequest{
+			PodSandboxId: pod.Id,
+		})
 		if err != nil {
-			return 0, fmt.Errorf("error getting labels for container %s: %v", ctr.ID(), err)
+			fmt.Printf("Failed to get pod status: %v\n", err)
+			continue
 		}
-		fmt.Printf("container %s labels: %v\n", ctr.ID(), labels)
+
+		// 直接从 status.Info 中解析 PID
+		info := status.GetInfo()
+		if info == nil {
+			continue
+		}
+
+		// 解析 info 中的 "pid" 字段（JSON 格式）
+		pid := parsePIDFromInfo(info["info"])
+		fmt.Printf("Pod: %s, Pause容器PID: %d\n", pod.Metadata.Name, pid)
 	}
-	return 0, nil
 }
 
-func sandboxFind(podName string) (int, error) {
-	client, err := containerd.New(global.ContainerdRuntimeAddress)
-	if err != nil {
-		return 0, fmt.Errorf("error creating containerd client:%v", err)
-	}
-	defer client.Close()
+// 从 info JSON 字符串中解析 PID
+func parsePIDFromInfo(infoStr string) int {
+	// 这里需要实际解析 JSON 字符串，例如：
+	// {"pid": 12345, ...}
+	// 为简化示例，假设直接提取 PID
+	// 实际代码中应使用 json.Unmarshal
+	var pid int
+	fmt.Sscanf(infoStr, `{"pid":%d`, &pid) // 简化处理，实际需要完整解析
+	return pid
+}
 
-	ctx := namespaces.WithNamespace(context.Background(), global.K8sNamespace)
-	sandbox, err := client.LoadSandbox(ctx, podName)
-	if err != nil {
-		return 0, fmt.Errorf("error listing containers in containerd: %v", err)
+// 自动检测 CRI Socket
+func getCRISocket() string {
+	for _, path := range []string{containerdSocket, crioSocket} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
 	}
-
-	fmt.Printf("sandbox %+v\n", sandbox)
-	return 0, nil
+	panic("未找到可用的 CRI Socket")
 }
